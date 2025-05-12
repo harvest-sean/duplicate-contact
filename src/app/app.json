@@ -1,0 +1,27 @@
+{
+  "name": "🍊 Deal Duplicator",
+  "description": "The following custom card will allow individuals to duplicate deals. -LM, HarvestROI 01/2025",
+  "uid": "duplicate_contact_example_app",
+  "scopes": [
+    "crm.objects.contacts.read",
+    "crm.objects.deals.read",
+    "crm.objects.companies.read",
+    "collector.graphql_schema.read",
+    "collector.graphql_query.execute",
+    "crm.objects.contacts.write",
+    "crm.objects.deals.write",
+    "crm.objects.line_items.read",
+    "crm.objects.quotes.read",
+    "tickets"
+  ],
+  "public": false,
+  "extensions": {
+    "crm": {
+      "cards": [
+        {
+          "file": "extensions/duplicate-contact-example-card.json"
+        }
+      ]
+    }
+  }
+}

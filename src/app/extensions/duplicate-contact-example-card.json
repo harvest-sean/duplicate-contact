@@ -1,0 +1,12 @@
+{
+  "type": "crm-card",
+  "data": {
+    "title": "🍊 Deal Duplicator",
+    "uid": "duplicate_contact_example_card",
+    "location": "crm.record.tab",
+    "module": {
+      "file": "Extension.tsx"
+    },
+    "objectTypes": [{ "name": "deals" }]
+  }
+}
