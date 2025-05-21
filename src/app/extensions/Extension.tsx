@@ -72,7 +72,7 @@ const Extension = ({ context }: ExtensionProps) => {
         // For Duplicated Deals list
         const clonedDeals = (response as DealAssociations).original_deal_cloned_deal || [];
         const dealsWithUrls = clonedDeals.map(item => ({
-          id: item.id,
+          id: Number(item.id),
           url: `https://app.hubspot.com/contacts/${context.portal.id}/deal/${item.id}`,
         }));
         setDuplicatedDeals(dealsWithUrls);
@@ -111,6 +111,8 @@ const Extension = ({ context }: ExtensionProps) => {
           const newDealUrl = `https://app.hubspot.com/contacts/${context.portal.id}/deal/${newDealId}`;
           setUrl(newDealUrl);
           setDuplicatedDeals(prev => [...prev, { id: Number(newDealId), url: newDealUrl }]);
+          // Refresh associations after creating a new deal
+          setTimeout(() => fetchAllAssociations(), 2000);
         } else {
           setError('Failed to duplicate deal.');
         }
@@ -153,18 +155,26 @@ const Extension = ({ context }: ExtensionProps) => {
     );
   }
 
+  // Calculate counts for each association type
+  const associationCounts = Object.entries(LABEL_MAP).map(([key, label]) => {
+    const count = associations[key as keyof DealAssociations]?.length ?? 0;
+    return { key, label, count };
+  });
+
   return (
     <Flex direction="column" gap="lg">
       <Text variant="microcopy">
         Duplicate a deal along with its properties and associations (contacts, companies, tickets, etc).
       </Text>
+      
       <DescriptionList direction="row">
-        {Object.entries(LABEL_MAP).map(([key, label]) => (
+        {associationCounts.map(({ key, label, count }) => (
           <DescriptionListItem label={label} key={key}>
-            {associations[key as keyof DealAssociations]?.length ?? 0}
+            {count}
           </DescriptionListItem>
         ))}
       </DescriptionList>
+      
       <Flex direction="row" justify="end">
         <Button
           onClick={duplicateDeal}
@@ -178,6 +188,7 @@ const Extension = ({ context }: ExtensionProps) => {
           {duplicating ? 'Duplicating...' : 'Duplicate Deal'}
         </Button>
       </Flex>
+      
       {/* List of duplicated deals */}
       {duplicatedDeals.length > 0 && (
         <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>
@@ -205,6 +216,7 @@ const Extension = ({ context }: ExtensionProps) => {
           ))}
         </Flex>
       )}
+      
       {/* Link to new deal if created in this session */}
       {url && (
         <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>

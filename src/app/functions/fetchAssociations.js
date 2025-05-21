@@ -58,12 +58,18 @@ const fetchAssociations = async (token, id) => {
     // Log raw for troubleshooting
     console.log('Raw associations from API:', JSON.stringify(assoc, null, 2));
 
-    return {
+    // Make sure we correctly map all association types
+    const result = {
       deal_contact: mapItems(assoc.contact_collection__deal_to_contact?.items, 'contacts'),
       DEAL_TO_COMPANY: mapItems(assoc.company_collection__deal_to_company_unlabeled?.items, 'companies'),
       original_deal_cloned_deal: mapItems(assoc.deal_collection__original_deal_cloned_deal?.items, 'deals'),
-      ramp: mapItems(assoc.ticket_collection__deal_to_ticket?.items, 'tickets') // Tickets
+      ramp: mapItems(assoc.ticket_collection__deal_to_ticket?.items, 'tickets')
     };
+
+    // Log mapped associations for debugging
+    console.log('Mapped associations:', JSON.stringify(result, null, 2));
+    
+    return result;
   } catch (error) {
     console.error('Error fetching deal associations:', error.message);
     throw error;

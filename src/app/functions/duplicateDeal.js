@@ -90,6 +90,8 @@ exports.main = async (context = {}) => {
       remappedAssociations[mappedKey] = items;
     }
 
+    console.log('Remapped associations:', JSON.stringify(remappedAssociations, null, 2));
+
     // Associate new deal with all related records & create bidirectional deal link
     await setAssociations(token, newDealId, remappedAssociations, dealId);
 
@@ -156,75 +158,251 @@ const updateDealStage = async (token, dealId, properties) => {
   );
 };
 
-// --- UPDATED LOGIC STARTS HERE ---
-
+// Fixed association handling logic
 const setAssociations = async (token, newDealId, associations, originalDealId) => {
   const tasks = [];
 
-  // Original <-> Clone (both directions for deals)
+  // Associate original deal <-> new deal (bidirectional)
   if (originalDealId && newDealId && originalDealId !== newDealId) {
-    // Associate original -> clone
+    // Original deal -> new deal
     tasks.push(
       createAssociation(token, originalDealId, newDealId, 'deals', 'deals', ASSOCIATION_TYPE_IDS.original_deal_cloned_deal)
     );
-    // Associate clone -> original
+    // New deal -> original deal
     tasks.push(
       createAssociation(token, newDealId, originalDealId, 'deals', 'deals', ASSOCIATION_TYPE_IDS.original_deal_cloned_deal)
     );
   }
 
-  // Associate the clone with all related records
-  for (const [label, assocList] of Object.entries(associations)) {
-    const typeId = ASSOCIATION_TYPE_IDS[label];
-    if (!typeId) continue;
-    if (!Array.isArray(assocList)) continue;
-    for (const assoc of assocList) {
-      if (!assoc?.id || !assoc?.type) continue;
-      if (assoc.id === newDealId) continue;
+  console.log('Associations to process:', JSON.stringify(associations, null, 2));
 
-      // --- TICKETS ---
-      if (label === 'ramp' && assoc.type === 'tickets') {
-        // Associate deal (newDealId) <-> ticket (assoc.id)
-        tasks.push(createAssociation(token, newDealId, assoc.id, 'deals', 'tickets', ASSOCIATION_TYPE_IDS.ramp));
-        // (Optional: If you want the ticket to show the new deal in its associations, also do this:)
-        tasks.push(createAssociation(token, assoc.id, newDealId, 'tickets', 'deals', ASSOCIATION_TYPE_IDS.ramp));
+  // Process all associations and create connections to the new deal
+  for (const [key, items] of Object.entries(associations)) {
+    if (!Array.isArray(items)) continue;
+    
+    for (const item of items) {
+      if (!item || !item.id || !item.type) continue;
+      if (item.id === newDealId) continue; // Skip self-association
+      
+      // Get association type ID
+      const typeId = ASSOCIATION_TYPE_IDS[key];
+      if (!typeId) {
+        console.log(`No association type ID for key: ${key}`);
         continue;
       }
-
-      // --- DEALS ---
-      if (label === 'original_deal_cloned_deal' && assoc.type === 'deals') {
-        // Avoid duplicating the bidirectional link already set above
-        // (If you want to copy all other deal associations as well, keep this line)
-        tasks.push(createAssociation(token, newDealId, assoc.id, 'deals', 'deals', ASSOCIATION_TYPE_IDS.original_deal_cloned_deal));
-        continue;
+      
+      let fromType = 'deals';
+      let toType = '';
+      
+      // Determine object type for association
+      switch (item.type) {
+        case 'contacts':
+          toType = 'contacts';
+          break;
+        case 'companies':
+          toType = 'companies';
+          break;
+        case 'deals':
+          toType = 'deals';
+          break;
+        case 'tickets':
+          toType = 'tickets';
+          break;
+        default:
+          console.log(`Unknown object type: ${item.type}`);
+          continue;
       }
-
-      // --- CONTACTS ---
-      if (label === 'deal_contact' && assoc.type === 'contacts') {
-        tasks.push(createAssociation(token, newDealId, assoc.id, 'deals', 'contacts', ASSOCIATION_TYPE_IDS.deal_contact));
-        continue;
-      }
-
-      // --- COMPANIES ---
-      if (label === 'DEAL_TO_COMPANY' && assoc.type === 'companies') {
-        tasks.push(createAssociation(token, newDealId, assoc.id, 'deals', 'companies', ASSOCIATION_TYPE_IDS.DEAL_TO_COMPANY));
-        continue;
+      
+      console.log(`Processing association: ${fromType}/${newDealId} -> ${toType}/${item.id} (type ${typeId})`);
+      
+      // Create association from new deal to the associated object
+      tasks.push(
+        createAssociation(token, newDealId, item.id, fromType, toType, typeId)
+      );
+      
+      // For tickets, we need to use a more direct approach to ensure the association is created
+      if (item.type === 'tickets') {
+        console.log(`Creating ticket association using standard API for ticket ${item.id}`);
+        
+        // Try direct ticket association using the v4 batch API
+        try {
+          const batchResponse = await axios.post(
+            'https://api.hubapi.com/crm/v4/associations/deals/tickets/batch/create',
+            {
+              inputs: [
+                {
+                  from: { id: newDealId },
+                  to: { id: item.id },
+                  types: [
+                    {
+                      associationCategory: "USER_DEFINED",
+                      associationTypeId: ASSOCIATION_TYPE_IDS.ramp
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              headers: { 
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`
+              }
+            }
+          );
+          console.log('Batch association response:', JSON.stringify(batchResponse.data, null, 2));
+        } catch (err) {
+          console.error('Error with batch association:', err.message);
+          // Still try the standard method as fallback
+          tasks.push(
+            createAssociation(token, item.id, newDealId, toType, fromType, typeId)
+          );
+        }
       }
     }
   }
 
-  await Promise.all(tasks);
+  // Special case: also try to find tickets via REST API directly
+  try {
+    console.log(`Fetching tickets for deal ${originalDealId} via REST API`);
+    const ticketsResponse = await axios.get(
+      `https://api.hubapi.com/crm/v3/objects/deals/${originalDealId}/associations/tickets`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    
+    if (ticketsResponse.data && ticketsResponse.data.results) {
+      console.log('Found tickets via REST API:', JSON.stringify(ticketsResponse.data.results, null, 2));
+      
+      for (const ticket of ticketsResponse.data.results) {
+        console.log(`Processing ticket association for ticket ${ticket.id} from REST API`);
+        
+        // Create association via batch API
+        try {
+          await axios.post(
+            'https://api.hubapi.com/crm/v4/associations/deals/tickets/batch/create',
+            {
+              inputs: [
+                {
+                  from: { id: newDealId },
+                  to: { id: ticket.id },
+                  types: [
+                    {
+                      associationCategory: "USER_DEFINED",
+                      associationTypeId: ASSOCIATION_TYPE_IDS.ramp
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              headers: { 
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`
+              }
+            }
+          );
+          
+          // Also try the reverse association
+          await axios.post(
+            'https://api.hubapi.com/crm/v4/associations/tickets/deals/batch/create',
+            {
+              inputs: [
+                {
+                  from: { id: ticket.id },
+                  to: { id: newDealId },
+                  types: [
+                    {
+                      associationCategory: "USER_DEFINED",
+                      associationTypeId: ASSOCIATION_TYPE_IDS.ramp
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              headers: { 
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`
+              }
+            }
+          );
+        } catch (err) {
+          console.error('Error with batch API for tickets:', err.message);
+          // Fallback to standard method
+          tasks.push(
+            createAssociation(token, newDealId, ticket.id, 'deals', 'tickets', ASSOCIATION_TYPE_IDS.ramp)
+          );
+          tasks.push(
+            createAssociation(token, ticket.id, newDealId, 'tickets', 'deals', ASSOCIATION_TYPE_IDS.ramp)
+          );
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching tickets via REST API:', error.message);
+  }
+
+  // Execute all association tasks in parallel
+  try {
+    await Promise.all(tasks);
+    console.log(`Successfully created ${tasks.length} associations for deal ${newDealId}`);
+  } catch (error) {
+    console.error('Error creating associations:', error);
+    throw error;
+  }
 };
 
 const createAssociation = async (token, fromId, toId, fromType, toType, associationTypeId) => {
   if (!fromId || !toId || !associationTypeId) return;
+  
+  // Log details for debugging
+  console.log(`Creating association: ${fromType}/${fromId} -> ${toType}/${toId} (type ${associationTypeId})`);
+  
   const url = `https://api.hubapi.com/crm/v3/objects/${fromType}/${fromId}/associations/${toType}/${toId}/${associationTypeId}`;
+  
   try {
-    await axios.put(url, {}, {
+    const response = await axios.put(url, {}, {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
     });
+    console.log(`Association created successfully: ${fromType}/${fromId} -> ${toType}/${toId}`);
+    return true;
   } catch (err) {
     console.error(`Failed to associate ${fromType} ${fromId} to ${toType} ${toId} (typeId: ${associationTypeId}):`, err.message);
+    
+    // Try alternative association method for tickets
+    if (toType === 'tickets' || fromType === 'tickets') {
+      console.log(`Trying alternative association method for ticket ${toType === 'tickets' ? toId : fromId}`);
+      try {
+        // Try the v4 API for associations
+        const endpoint = `https://api.hubapi.com/crm/v4/associations/${fromType}/${toType}/batch/create`;
+        await axios.post(endpoint, {
+          inputs: [
+            {
+              from: { id: fromId },
+              to: { id: toId },
+              types: [
+                {
+                  associationCategory: "USER_DEFINED",
+                  associationTypeId: associationTypeId
+                }
+              ]
+            }
+          ]
+        }, {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+        });
+        console.log(`V4 API association created successfully: ${fromType}/${fromId} -> ${toType}/${toId}`);
+        return true;
+      } catch (v4Err) {
+        console.error(`V4 API association also failed: ${v4Err.message}`);
+        return false;
+      }
+    }
+    
+    return false;
   }
 };
 
@@ -232,9 +410,11 @@ const filterProperties = (props) => {
   const exclude = ['hs_object_id', 'associations'];
   return Object.fromEntries(Object.entries(props).filter(([k, v]) => !exclude.includes(k) && v != null));
 };
+
 const extractValues = (props) => {
   return Object.fromEntries(Object.entries(props).map(([k, v]) => [k, typeof v === 'object' && v?.value ? v.value : v]));
 };
+
 const filterEmptyProperties = (props) => {
   return Object.fromEntries(Object.entries(props).filter(([k, v]) => v !== null && v !== undefined));
 };
