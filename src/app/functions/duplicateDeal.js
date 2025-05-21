@@ -92,6 +92,17 @@ exports.main = async (context = {}) => {
 
     console.log('Remapped associations:', JSON.stringify(remappedAssociations, null, 2));
 
+    // Ensure we have original_deal_cloned_deal in the remapped associations
+    if (!remappedAssociations.original_deal_cloned_deal) {
+      remappedAssociations.original_deal_cloned_deal = [];
+    }
+    
+    // Add the original deal as an association to ensure bidirectional linking
+    remappedAssociations.original_deal_cloned_deal.push({
+      id: dealId,
+      type: 'deals'
+    });
+
     // Associate new deal with all related records & create bidirectional deal link
     await setAssociations(token, newDealId, remappedAssociations, dealId);
 
@@ -100,6 +111,9 @@ exports.main = async (context = {}) => {
       dealstage: "991352390",
       pipeline: "676191779"
     });
+
+    // Create direct bidirectional association between original deal and new deal
+    await createDirectDealAssociation(token, dealId, newDealId);
 
     return { status: "ok", newDealId };
   } catch (error) {
@@ -156,6 +170,69 @@ const updateDealStage = async (token, dealId, properties) => {
     { properties },
     { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` } }
   );
+};
+
+// Create direct bidirectional association between deals using the v4 API
+const createDirectDealAssociation = async (token, originalDealId, newDealId) => {
+  try {
+    console.log(`Creating direct bidirectional association between deals: ${originalDealId} <-> ${newDealId}`);
+    
+    // Original deal -> New deal
+    await axios.post(
+      'https://api.hubapi.com/crm/v4/associations/deals/deals/batch/create',
+      {
+        inputs: [
+          {
+            from: { id: originalDealId },
+            to: { id: newDealId },
+            types: [
+              {
+                associationCategory: "USER_DEFINED",
+                associationTypeId: ASSOCIATION_TYPE_IDS.original_deal_cloned_deal
+              }
+            ]
+          }
+        ]
+      },
+      {
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+    
+    // New deal -> Original deal
+    await axios.post(
+      'https://api.hubapi.com/crm/v4/associations/deals/deals/batch/create',
+      {
+        inputs: [
+          {
+            from: { id: newDealId },
+            to: { id: originalDealId },
+            types: [
+              {
+                associationCategory: "USER_DEFINED",
+                associationTypeId: ASSOCIATION_TYPE_IDS.original_deal_cloned_deal
+              }
+            ]
+          }
+        ]
+      },
+      {
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+    
+    console.log(`Successfully created bidirectional association between deals ${originalDealId} and ${newDealId}`);
+    return true;
+  } catch (error) {
+    console.error('Error creating direct deal association:', error.message);
+    return false;
+  }
 };
 
 // Fixed association handling logic

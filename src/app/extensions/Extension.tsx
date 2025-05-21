@@ -32,7 +32,7 @@ interface DealAssociations {
 const LABEL_MAP: { [key: string]: string } = {
   deal_contact: 'Contacts',
   DEAL_TO_COMPANY: 'Companies',
-  original_deal_cloned_deal: 'Duplicated Deals',
+  original_deal_cloned_deal: 'Related Deals',
   ramp: 'Tickets',
 };
 
@@ -69,9 +69,9 @@ const Extension = ({ context }: ExtensionProps) => {
         }
         setAssociations(response as DealAssociations);
 
-        // For Duplicated Deals list
-        const clonedDeals = (response as DealAssociations).original_deal_cloned_deal || [];
-        const dealsWithUrls = clonedDeals.map(item => ({
+        // For Duplicated/Related Deals list
+        const relatedDeals = (response as DealAssociations).original_deal_cloned_deal || [];
+        const dealsWithUrls = relatedDeals.map(item => ({
           id: Number(item.id),
           url: `https://app.hubspot.com/contacts/${context.portal.id}/deal/${item.id}`,
         }));
@@ -165,6 +165,7 @@ const Extension = ({ context }: ExtensionProps) => {
     <Flex direction="column" gap="lg">
       <Text variant="microcopy">
         Duplicate a deal along with its properties and associations (contacts, companies, tickets, etc).
+        Original and duplicated deals will be linked together.
       </Text>
       
       <DescriptionList direction="row">
@@ -189,10 +190,10 @@ const Extension = ({ context }: ExtensionProps) => {
         </Button>
       </Flex>
       
-      {/* List of duplicated deals */}
+      {/* List of related deals
       {duplicatedDeals.length > 0 && (
         <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>
-          <Text format={{ fontWeight: 'bold' }}>Duplicated Deals:</Text>
+          <Text format={{ fontWeight: 'bold' }}>Related Deals:</Text>
           {duplicatedDeals.map(deal => (
             <Link key={deal.id} href={deal.url} external>
               Deal ID: {deal.id}
@@ -202,7 +203,7 @@ const Extension = ({ context }: ExtensionProps) => {
       )}
       
       {/* List of associated tickets */}
-      {associations.ramp?.length > 0 && (
+      {/* {associations.ramp?.length > 0 && (
         <Flex direction="column" gap="sm" style={{ marginTop: '1rem' }}>
           <Text format={{ fontWeight: 'bold' }}>Associated Tickets:</Text>
           {associations.ramp.map(ticket => (
@@ -215,8 +216,8 @@ const Extension = ({ context }: ExtensionProps) => {
             </Link>
           ))}
         </Flex>
-      )}
-      
+      )} */}
+       
       {/* Link to new deal if created in this session */}
       {url && (
         <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>
