@@ -1,0 +1,149 @@
+// addAssociationsToClonedDeal.js
+
+const axios = require('axios');
+
+const ASSOCIATION_TYPE_IDS = {
+  deal_contact: 3,
+  DEAL_TO_COMPANY: 5,
+  ramp: 116,
+  original_deal_cloned_deal: 79
+};
+
+const TYPE_MAP = {
+  deal_contact: { toType: 'contact', associationTypeId: ASSOCIATION_TYPE_IDS.deal_contact },
+  DEAL_TO_COMPANY: { toType: 'company', associationTypeId: ASSOCIATION_TYPE_IDS.DEAL_TO_COMPANY },
+  ramp: { toType: 'ticket', associationTypeId: ASSOCIATION_TYPE_IDS.ramp },
+  original_deal_cloned_deal: { toType: 'deal', associationTypeId: ASSOCIATION_TYPE_IDS.original_deal_cloned_deal }
+};
+
+exports.main = async (context = {}) => {
+  const { originalDealId, newDealId } = context.parameters || {};
+  const token = process.env['PRIVATE_APP_ACCESS_TOKEN'];
+  if (!originalDealId || !newDealId) {
+    return { status: 'error', message: 'Both originalDealId and newDealId are required.' };
+  }
+  if (!token) return { status: 'error', message: 'No HubSpot Private App token available!' };
+
+  // Fetch associations for original deal (re-using your fetchAssociations logic)
+  const associations = await fetchAssociations(token, originalDealId);
+
+  // Only tickets and deals (for your request, but you can add contacts/companies too)
+  await associateAllTypesV4(token, newDealId, associations, originalDealId);
+
+  return { status: "ok" };
+};
+
+const fetchAssociations = async (token, dealId) => {
+  const requestBody = {
+    operationName: 'data',
+    query: `
+      query data ($id: String!) {
+        CRM {
+          deal(uniqueIdentifier: "hs_object_id", uniqueIdentifierValue: $id) {
+            hs_object_id
+            associations {
+              contact_collection__deal_to_contact { items { hs_object_id } }
+              company_collection__deal_to_company_unlabeled { items { hs_object_id } }
+              deal_collection__original_deal_cloned_deal { items { hs_object_id } }
+              ticket_collection__deal_to_ticket { items { hs_object_id } }
+            }
+          }
+        }
+      }
+    `,
+    variables: { id: String(dealId) },
+  };
+
+  const response = await axios.post(
+    'https://api.hubapi.com/collector/graphql',
+    JSON.stringify(requestBody),
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  const assoc = response.data.data.CRM.deal.associations || {};
+
+  // Convert response to the same structure your batch function expects:
+  const mapItems = (arr, type) =>
+    (arr || []).map(i => ({ id: i.hs_object_id, type }));
+
+  return {
+    deal_contact: mapItems(assoc.contact_collection__deal_to_contact?.items, 'contact'),
+    DEAL_TO_COMPANY: mapItems(assoc.company_collection__deal_to_company_unlabeled?.items, 'company'),
+    original_deal_cloned_deal: mapItems(assoc.deal_collection__original_deal_cloned_deal?.items, 'deal'),
+    ramp: mapItems(assoc.ticket_collection__deal_to_ticket?.items, 'ticket')
+  };
+};
+
+const associateAllTypesV4 = async (token, newDealId, associations, originalDealId) => {
+  const batches = [];
+  for (const [label, assocList] of Object.entries(associations)) {
+    const config = TYPE_MAP[label];
+    if (!config || !Array.isArray(assocList) || assocList.length === 0) continue;
+    const toType = config.toType;
+    const typeId = config.associationTypeId;
+    const ids = assocList.map(a => a.id).filter(id => id && id !== newDealId);
+
+    if (!ids.length) continue;
+
+    // Deals: bidirectional
+    if (label === 'original_deal_cloned_deal') {
+      const uniqueDealIds = [...new Set(ids.filter(id => id !== newDealId && id !== originalDealId))];
+      if (originalDealId && newDealId && originalDealId !== newDealId) {
+        batches.push(buildBatch('deal', 'deal', originalDealId, [newDealId], typeId));
+        batches.push(buildBatch('deal', 'deal', newDealId, [originalDealId], typeId));
+      }
+      if (uniqueDealIds.length) {
+        batches.push(buildBatch('deal', 'deal', newDealId, uniqueDealIds, typeId));
+        uniqueDealIds.forEach(dealId => {
+          batches.push(buildBatch('deal', 'deal', dealId, [newDealId], typeId));
+        });
+      }
+      continue;
+    }
+
+    // Tickets: bidirectional
+    if (label === 'ramp') {
+      batches.push(buildBatch('deal', 'ticket', newDealId, ids, typeId));
+      ids.forEach(ticketId => {
+        batches.push(buildBatch('ticket', 'deal', ticketId, [newDealId], typeId));
+      });
+      continue;
+    }
+
+    // Contacts & Companies
+    batches.push(buildBatch('deal', toType, newDealId, ids, typeId));
+  }
+
+  // Execute all batch calls
+  for (const call of batches) {
+    if (!call) continue;
+    const url = `https://api.hubapi.com/crm/v4/associations/${call.fromType}/${call.toType}/batch/create`;
+    try {
+      await axios.post(url, call.payload, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      });
+    } catch (err) {
+      console.error(
+        `Failed v4 association batch from ${call.fromType} to ${call.toType}:`,
+        err.response?.data || err.message
+      );
+    }
+  }
+};
+
+const buildBatch = (fromType, toType, fromId, toIds, associationTypeId) => ({
+  fromType,
+  toType,
+  payload: {
+    inputs: toIds.map(toId => ({
+      from: { id: fromId },
+      to: { id: toId },
+      type: String(associationTypeId)
+    }))
+  }
+});

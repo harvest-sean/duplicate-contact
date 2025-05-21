@@ -1,5 +1,3 @@
-// Updated Extension.tsx
-
 import React, { useEffect, useState } from 'react';
 import {
   Alert,
@@ -22,139 +20,201 @@ interface ExtensionProps {
   context: CrmContext;
 }
 
-export interface Association {
-  total: number;
-  items: { hs_object_id: number }[];
+type AssociationList = { id: string | number; type: string }[];
+
+interface DealAssociations {
+  deal_contact?: AssociationList;
+  DEAL_TO_COMPANY?: AssociationList;
+  original_deal_cloned_deal?: AssociationList;
+  ramp?: AssociationList;
 }
 
-export interface DealAssociationsGQL {
-  contact_collection__deal_to_contact: Association;
-  company_collection__deal_to_company_unlabeled: Association;
-  line_item_collection__primary: Association;
-  quote_collection__primary: Association;
-  ticket_collection__deal_to_ticket: Association;
-  deal_collection__deal_to_deal: Association;
-  deal_collection__original_deal_cloned_deal: Association;
-}
+const LABEL_MAP: { [key: string]: string } = {
+  deal_contact: 'Contacts',
+  DEAL_TO_COMPANY: 'Companies',
+  original_deal_cloned_deal: 'Duplicated Deals',
+  ramp: 'Tickets',
+};
 
 const Extension = ({ context }: ExtensionProps) => {
+  const dealId = context?.crm?.objectId;
+  const [associations, setAssociations] = useState<DealAssociations>({});
   const [loading, setLoading] = useState(true);
-  const [associations, setAssociations] = useState<DealAssociationsGQL>();
-  const [url, setUrl] = useState('');
   const [error, setError] = useState('');
-  const [duplicatedDeals, setDuplicatedDeals] = useState<{ id: number, url: string }[]>([]);
+  const [duplicatedDeals, setDuplicatedDeals] = useState<{ id: number; url: string }[]>([]);
+  const [duplicating, setDuplicating] = useState(false);
+  const [url, setUrl] = useState('');
 
-  useEffect(() => {
-    // Fetch associations to display existing duplicated deals
-    hubspot
-      .serverless('fetchAssociations', {
-        propertiesToSend: ['hs_object_id'],
-      })
-      .then((response) => {
-        const associations = response.associations as DealAssociationsGQL;
-        setAssociations(associations);
+  const associationsAreValid = (data: any) =>
+    !!data && typeof data === 'object' && !('status' in data) && !('message' in data);
 
-        // Use the GraphQL response to get cloned deals
-        const clonedDeals = associations.deal_collection__original_deal_cloned_deal?.items || [];
+  const fetchAllAssociations = () => {
+    if (!dealId) {
+      setError('No deal ID found in context. This extension must be used inside a deal record.');
+      setLoading(false);
+      setAssociations({});
+      return;
+    }
+    setLoading(true);
+    setError('');
+    (hubspot.serverless as any)('fetchAssociations', {
+      parameters: { dealId }
+    })
+      .then((response: any) => {
+        console.log('Associations fetched:', response);
+        if (!associationsAreValid(response)) {
+          setError('No associations found or error loading associations.');
+          setAssociations({});
+          return;
+        }
+        setAssociations(response as DealAssociations);
+
+        // For Duplicated Deals list
+        const clonedDeals = (response as DealAssociations).original_deal_cloned_deal || [];
         const dealsWithUrls = clonedDeals.map(item => ({
-          id: item.hs_object_id,
-          url: `https://app.hubspot.com/contacts/${context.portal.id}/deal/${item.hs_object_id}`
+          id: item.id,
+          url: `https://app.hubspot.com/contacts/${context.portal.id}/deal/${item.id}`,
         }));
-
         setDuplicatedDeals(dealsWithUrls);
       })
-      .catch((error) => {
-        setError(error.message);
+      .catch((err: any) => {
+        setError(err?.message || 'Unknown error fetching associations.');
+        setAssociations({});
       })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, []);
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchAllAssociations();
+    // eslint-disable-next-line
+  }, [dealId, context.portal.id]);
 
   const duplicateDeal = () => {
-    setLoading(true);
-  
-    hubspot
-      .serverless('duplicateDeal', {
-        propertiesToSend: ['hs_object_id'],
-        parameters: { associations },
+    if (!dealId || !associationsAreValid(associations)) {
+      setError('No valid associations to duplicate.');
+      return;
+    }
+    setDuplicating(true);
+    setError('');
+    setUrl('');
+    (hubspot.serverless as any)('duplicateDeal', {
+      parameters: { dealId, associations },
+    })
+      .then((result: any) => {
+        let newDealId = '';
+        if (result && result.status === 'ok' && result.newDealId) {
+          newDealId = result.newDealId;
+        } else if (typeof result === 'string' || typeof result === 'number') {
+          newDealId = result.toString();
+        }
+        if (newDealId) {
+          const newDealUrl = `https://app.hubspot.com/contacts/${context.portal.id}/deal/${newDealId}`;
+          setUrl(newDealUrl);
+          setDuplicatedDeals(prev => [...prev, { id: Number(newDealId), url: newDealUrl }]);
+        } else {
+          setError('Failed to duplicate deal.');
+        }
       })
-      .then((newDealId) => {
-        // Ensure newDealId is a string or number representing the ID
-        const newDealUrl = `https://app.hubspot.com/contacts/${context.portal.id}/deal/${newDealId}`;
-        setUrl(newDealUrl);
-        setDuplicatedDeals(prevDeals => [...prevDeals, { id: newDealId, url: newDealUrl }]);
+      .catch((err: any) => {
+        setError(err?.message || 'Unknown error duplicating deal.');
       })
-      .catch((error) => {
-        setError(error.message);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+      .finally(() => setDuplicating(false));
   };
 
   if (loading) {
     return <LoadingSpinner label="Fetching deal associations..." />;
   }
-
-  if (error !== '') {
-    return <Alert title="Error">{error}</Alert>;
-  }
-
-  if (associations && url === '') {
+  if (error) {
     return (
-      <Flex direction="column" gap="lg">
-        <Text variant="microcopy">
-          Duplicate a deal along with some of its properties and associated objects.
-        </Text>
-        <Flex direction="column" gap="sm">
-          <Text format={{ fontWeight: 'bold' }}>
-            Number of associations to be copied:
-          </Text>
-          <DescriptionList direction="row">
-            <DescriptionListItem label="Contacts">
-              {associations.contact_collection__deal_to_contact?.total || 0}
-            </DescriptionListItem>
-            <DescriptionListItem label="Companies">
-              {associations.company_collection__deal_to_company_unlabeled?.total || 0}
-            </DescriptionListItem>
-            <DescriptionListItem label="Line Items">
-              {associations.line_item_collection__primary?.total || 0}
-            </DescriptionListItem>
-            <DescriptionListItem label="Quotes">
-              {associations.quote_collection__primary?.total || 0}
-            </DescriptionListItem> 
-            <DescriptionListItem label="Tickets">
-              {associations.ticket_collection__deal_to_ticket?.total || 0}
-            </DescriptionListItem>
-            <DescriptionListItem label="Deals">
-              {associations.deal_collection__deal_to_deal?.total || 0}
-            </DescriptionListItem>
-          </DescriptionList>
-          <Flex direction="row" justify="end">
-            <Button onClick={duplicateDeal} variant="primary">
-              Duplicate Deal
-            </Button>
-          </Flex>
-          {duplicatedDeals.length > 0 && (
-            <Flex direction="column" gap="sm" marginTop="lg">
-              <Text format={{ fontWeight: 'bold' }}>View Duplicated Deals:</Text>
-              {duplicatedDeals.map(deal => (
-                <Link key={deal.id} href={deal.url} target="_blank">
-                  Deal ID: {deal.id}
-                </Link>
-              ))}
-            </Flex>
-          )}
+      <Alert title="Error">
+        <Text>{error}</Text>
+        <Flex direction="row" justify="end">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setError('');
+              setUrl('');
+              fetchAllAssociations();
+            }}
+          >
+            Retry
+          </Button>
         </Flex>
-      </Flex>
+      </Alert>
+    );
+  }
+  if (!associationsAreValid(associations) || Object.keys(associations).length === 0) {
+    return (
+      <Alert title="No Associations Found">
+        <Text>
+          This deal has no contacts, companies, tickets, or other related records to duplicate.
+        </Text>
+      </Alert>
     );
   }
 
   return (
-    <Link href={url} target="_blank">
-      {url}
-    </Link>
+    <Flex direction="column" gap="lg">
+      <Text variant="microcopy">
+        Duplicate a deal along with its properties and associations (contacts, companies, tickets, etc).
+      </Text>
+      <DescriptionList direction="row">
+        {Object.entries(LABEL_MAP).map(([key, label]) => (
+          <DescriptionListItem label={label} key={key}>
+            {associations[key as keyof DealAssociations]?.length ?? 0}
+          </DescriptionListItem>
+        ))}
+      </DescriptionList>
+      <Flex direction="row" justify="end">
+        <Button
+          onClick={duplicateDeal}
+          variant="primary"
+          disabled={
+            duplicating ||
+            !associationsAreValid(associations) ||
+            Object.keys(associations).length === 0
+          }
+        >
+          {duplicating ? 'Duplicating...' : 'Duplicate Deal'}
+        </Button>
+      </Flex>
+      {/* List of duplicated deals */}
+      {duplicatedDeals.length > 0 && (
+        <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>
+          <Text format={{ fontWeight: 'bold' }}>Duplicated Deals:</Text>
+          {duplicatedDeals.map(deal => (
+            <Link key={deal.id} href={deal.url} external>
+              Deal ID: {deal.id}
+            </Link>
+          ))}
+        </Flex>
+      )}
+      
+      {/* List of associated tickets */}
+      {associations.ramp?.length > 0 && (
+        <Flex direction="column" gap="sm" style={{ marginTop: '1rem' }}>
+          <Text format={{ fontWeight: 'bold' }}>Associated Tickets:</Text>
+          {associations.ramp.map(ticket => (
+            <Link
+              key={ticket.id}
+              href={`https://app.hubspot.com/contacts/${context.portal.id}/ticket/${ticket.id}`}
+              external
+            >
+              Ticket ID: {ticket.id}
+            </Link>
+          ))}
+        </Flex>
+      )}
+      {/* Link to new deal if created in this session */}
+      {url && (
+        <Flex direction="column" gap="sm" style={{ marginTop: '2rem' }}>
+          <Text>New deal created:</Text>
+          <Link href={url} external>
+            {url}
+          </Link>
+        </Flex>
+      )}
+    </Flex>
   );
 };
 
