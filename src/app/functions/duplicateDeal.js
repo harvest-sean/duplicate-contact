@@ -30,6 +30,30 @@ exports.main = async (context = {}) => {
     const customFields = await fetchCustomDealFields(token, dealId);
     const originalProperties = { ...dealData, ...customFields };
 
+    // Get the current deal_clone_number (if it exists)
+    const currentCloneNumber = originalProperties.deal_clone_number 
+      ? parseInt(originalProperties.deal_clone_number, 10) 
+      : 0;
+    
+    // Find all related deals in this clone family
+    const cloneFamily = await findAllRelatedClones(token, dealId);
+    console.log(`Found ${cloneFamily.length} related deals in clone family`);
+    
+    // Determine the highest clone number in the family
+    let highestCloneNumber = currentCloneNumber;
+    for (const familyDeal of cloneFamily) {
+      const dealCloneNumber = familyDeal.properties?.deal_clone_number 
+        ? parseInt(familyDeal.properties.deal_clone_number, 10) 
+        : 0;
+      if (dealCloneNumber > highestCloneNumber) {
+        highestCloneNumber = dealCloneNumber;
+      }
+    }
+    
+    // New clone will have the highest number + 1
+    const newCloneNumber = highestCloneNumber + 1;
+    console.log(`Setting new clone number to ${newCloneNumber}`);
+
     // Count previous clones for correct deal name/numbering
     let clonedDealsCount = 0;
     try {
@@ -71,6 +95,7 @@ exports.main = async (context = {}) => {
       ...originalProperties,
       dealname: updatedDealName,
       deal_number: String(newDealNumber),
+      deal_clone_number: String(newCloneNumber), // Set the new clone number
       dealstage: "991352390",
       pipeline: "676191779"
     };
@@ -114,6 +139,21 @@ exports.main = async (context = {}) => {
 
     // Create direct bidirectional association between original deal and new deal
     await createDirectDealAssociation(token, dealId, newDealId);
+    
+    // Update all related deals in the clone family to increment their clone numbers
+    console.log(`Incrementing clone numbers for all ${cloneFamily.length} related deals in family`);
+    for (const familyDeal of cloneFamily) {
+      const dealId = familyDeal.id;
+      const currentNumber = familyDeal.properties?.deal_clone_number 
+        ? parseInt(familyDeal.properties.deal_clone_number, 10) 
+        : 0;
+      
+      const newNumber = currentNumber + 1;
+      await updateDealProperty(token, dealId, {
+        deal_clone_number: String(newNumber)
+      });
+      console.log(`Updated deal ${dealId} clone number from ${currentNumber} to ${newNumber}`);
+    }
 
     return { status: "ok", newDealId };
   } catch (error) {
@@ -132,7 +172,7 @@ const fetchDealData = async (token, dealId) => {
 const fetchCustomDealFields = async (token, dealId) => {
   const customProps = [
     "accounting_currency", "deal_type_", "acquiring_profitability__rate", "of_potential_clients",
-    "deal_number", "funding", "primary_trade_name", "reporting_name", "solutions_design_document_link",
+    "deal_number", "deal_clone_number", "funding", "primary_trade_name", "reporting_name", "solutions_design_document_link",
     "solutions_review_owner", "technical_review_link", "tier", "travel_type", "bonus", "bonus_amount",
     "bonus_terms", "bonus_type", "closed_won_reason_s_", "closed_won_notes", "company_revenue",
     "company_type", "contract_date", "contract_link", "contracted_minimum_volume__annualized_",
@@ -235,7 +275,118 @@ const createDirectDealAssociation = async (token, originalDealId, newDealId) => 
   }
 };
 
-// Fixed association handling logic
+// Helper function to find all related clones in the same family
+const findAllRelatedClones = async (token, dealId) => {
+  try {
+    console.log(`Finding all related clones for deal ${dealId}`);
+    
+    // First get all direct associations for this deal
+    const directAssociationsResponse = await axios.get(
+      `https://api.hubapi.com/crm/v3/objects/deals/${dealId}/associations/deals`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    
+    // Get the IDs of all directly associated deals
+    const directlyAssociatedDeals = directAssociationsResponse.data?.results || [];
+    const directlyAssociatedDealIds = directlyAssociatedDeals.map(deal => deal.id);
+    
+    console.log(`Found ${directlyAssociatedDealIds.length} directly associated deals`);
+    
+    // If there are no associations, return empty array
+    if (directlyAssociatedDealIds.length === 0) {
+      return [];
+    }
+    
+    // Now we need to get all deals that share associations with the original deal
+    // This finds the entire "clone family"
+    const cloneFamily = [];
+    const processedDealIds = new Set([dealId]); // Track processed deals to avoid duplicates
+    const dealQueue = [...directlyAssociatedDealIds]; // Queue of deals to process
+    
+    // Process all deals in the queue to find the entire clone family
+    while (dealQueue.length > 0) {
+      const currentDealId = dealQueue.shift();
+      
+      // Skip if we've already processed this deal
+      if (processedDealIds.has(currentDealId)) {
+        continue;
+      }
+      
+      processedDealIds.add(currentDealId);
+      
+      // Get deal properties 
+      try {
+        const dealResponse = await axios.get(
+          `https://api.hubapi.com/crm/v3/objects/deals/${currentDealId}?properties=deal_clone_number`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+        
+        const dealData = dealResponse.data;
+        cloneFamily.push(dealData);
+        
+        // Get this deal's associations to find more family members
+        const subAssociationsResponse = await axios.get(
+          `https://api.hubapi.com/crm/v3/objects/deals/${currentDealId}/associations/deals`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+        
+        const subAssociatedDeals = subAssociationsResponse.data?.results || [];
+        
+        // Add any new associated deals to the queue
+        for (const subDeal of subAssociatedDeals) {
+          if (!processedDealIds.has(subDeal.id)) {
+            dealQueue.push(subDeal.id);
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing deal ${currentDealId}:`, err.message);
+        // Continue with the next deal
+      }
+    }
+    
+    console.log(`Found a total of ${cloneFamily.length} deals in the clone family`);
+    return cloneFamily;
+    
+  } catch (error) {
+    console.error('Error finding related clones:', error.message);
+    // Return empty array in case of error
+    return [];
+  }
+};
+
+// Helper function to update a specific deal property
+const updateDealProperty = async (token, dealId, properties) => {
+  try {
+    await axios.patch(
+      `https://api.hubapi.com/crm/v3/objects/deals/${dealId}`,
+      { properties },
+      { 
+        headers: { 
+          'Content-Type': 'application/json', 
+          Authorization: `Bearer ${token}` 
+        } 
+      }
+    );
+    return true;
+  } catch (error) {
+    console.error(`Error updating deal ${dealId}:`, error.message);
+    return false;
+  }
+};
+
+// Fixed setAssociations function - now properly async
 const setAssociations = async (token, newDealId, associations, originalDealId) => {
   const tasks = [];
 
